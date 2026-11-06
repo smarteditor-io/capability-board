@@ -85,13 +85,13 @@ function spawnWorker(fnBody){
   const url=URL.createObjectURL(new Blob([fnBody],{type:'text/javascript'}));
   const w=new Worker(url); w._url=url; return w;
 }
-function workerOnce(fnBody, msg, ms=4000){
+function workerOnce(fnBody, msg, ms=4000, transfer){
   return new Promise((res,rej)=>{
     let w; try{ w=spawnWorker(fnBody);}catch(e){return rej(e);}
     const t=setTimeout(()=>{try{w.terminate()}catch(_){};rej(new Error('worker timeout'))},ms);
     w.onmessage=e=>{clearTimeout(t);try{w.terminate();URL.revokeObjectURL(w._url)}catch(_){}; res(e.data)};
     w.onerror=e=>{clearTimeout(t);try{w.terminate()}catch(_){}; rej(new Error(e.message||'worker error'))};
-    w.postMessage(msg);
+    w.postMessage(msg, transfer||[]);
   });
 }
 
@@ -260,7 +260,7 @@ const ATOMS = [
   {id:'transfer',cat:'Files / Transfer / Input',label:'Transferable ArrayBuffer',
    code:`worker.postMessage(buf,[buf]) // zero-copy, source detached`,
    run:async()=>{ try{ const ab=new ArrayBuffer(8); new Uint8Array(ab)[0]=7;
-     const r=await workerOnce(`onmessage=e=>postMessage(new Uint8Array(e.data)[0])`,ab,undefined);
+     const r=await workerOnce(`onmessage=e=>postMessage(new Uint8Array(e.data)[0])`,ab,undefined,[ab]);
      // after transfer the source buffer is detached (byteLength 0)
      const detached=ab.byteLength===0;
      return (r===7&&detached)?PASS('zero-copy transfer, source detached'):WARN('moved='+(r===7)+' detached='+detached);
