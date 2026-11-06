@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capability Board</title>
+<style>
+  :root{
+    --bg:#1b1917; --panel:#262321; --panel2:#2f2b28; --line:#3a3531; --line2:#4a443d;
+    --ink:#e8e4dc; --dim:#9a938a; --accent:darkorange;
+    --pass:#3ecf8e; --fail:#e5484d; --warn:#e2a93b; --skip:#6b6258;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif}
+  header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px}
+  h1{margin:0;font-size:16px;font-weight:600}
+  .sub{color:var(--dim);font-size:11.5px;margin-top:2px}
+  .env{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;font-size:11.5px;color:var(--dim)}
+  .env b{color:var(--ink);font-weight:600}
+  .bar{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .tally{display:flex;gap:8px;font-size:12px}
+  .tally span{padding:3px 9px;border-radius:12px;font-weight:600}
+  .t-pass{background:rgba(62,207,142,.15);color:var(--pass)}
+  .t-fail{background:rgba(229,72,77,.15);color:var(--fail)}
+  .t-warn{background:rgba(226,169,59,.15);color:var(--warn)}
+  .t-skip{background:rgba(107,98,88,.2);color:var(--dim)}
+  button{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer}
+  button:hover{background:#3a3531}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  main{padding:14px 16px;max-width:1100px;margin:0 auto}
+  .cat{margin:18px 0 8px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:flex;flex-direction:column;gap:7px}
+  .card.fail{border-color:#5a2b2d}
+  .row{display:flex;align-items:center;gap:8px}
+  .pill{font-size:10px;font-weight:700;letter-spacing:.03em;padding:2px 7px;border-radius:10px;text-transform:uppercase}
+  .p-pass{background:rgba(62,207,142,.15);color:var(--pass)}
+  .p-fail{background:rgba(229,72,77,.15);color:var(--fail)}
+  .p-warn{background:rgba(226,169,59,.15);color:var(--warn)}
+  .p-skip{background:rgba(107,98,88,.25);color:var(--dim)}
+  .p-run{background:rgba(255,255,255,.08);color:var(--dim)}
+  .name{font-weight:600;flex:1}
+  .detail{font-size:11.5px;color:var(--dim);word-break:break-word;min-height:1.4em}
+  .vis{display:flex;gap:8px;align-items:center}
+  .vis canvas{background:#0e0d0c;border:1px solid var(--line2);border-radius:4px;image-rendering:pixelated}
+  details{font-size:11px}
+  summary{cursor:pointer;color:var(--dim);user-select:none}
+  pre{margin:6px 0 0;padding:8px;background:#141312;border:1px solid var(--line);border-radius:6px;overflow:auto;max-height:200px;color:#cfc8bd;font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+  .foot{color:var(--dim);font-size:11px;margin:22px 0 40px;line-height:1.7}
+  textarea{width:100%;height:70px;background:#141312;color:var(--ink);border:1px solid var(--line2);border-radius:6px;font:11px ui-monospace,monospace;padding:6px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Capability Board <span class="sub" style="font-weight:400">— what our stack needs, tested where it runs</span></h1>
+  <div class="env" id="env"></div>
+  <div class="bar">
+    <div class="tally" id="tally"></div>
+    <span style="flex:1"></span>
+    <button id="rerun">Re-run</button>
+    <button id="copy">Copy JSON</button>
+    <button id="dl">Download JSON</button>
+    <button id="record">Record ↑</button>
+    <button class="primary" id="focus">Failures first</button>
+  </div>
+</header>
+<main id="main"></main>
+<section id="history" style="max-width:1100px;margin:0 auto;padding:0 16px 48px"></section>
+
+<script>
+"use strict";
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOM REGISTRY — one entry per capability. To add a test: push {id,cat,label,code,
+// run}. `run` returns {status:'pass'|'fail'|'warn'|'skip', detail, draw?(canvas)}.
+// `code` is the probe shown in the card (keep it the real essence of the check).
+// Render atoms should DRAW and read back a pixel so a pass is proven, not assumed.
+// ─────────────────────────────────────────────────────────────────────────────
+const PASS=(detail,draw)=>({status:'pass',detail,draw});
+const FAIL=(detail)=>({status:'fail',detail});
+const WARN=(detail)=>({status:'warn',detail});
+const SKIP=(detail)=>({status:'skip',detail});
+
+// a reusable inline worker for worker-only probes (SyncAccessHandle, worker roundtrip)
+function spawnWorker(fnBody){
+  const url=URL.createObjectURL(new Blob([fnBody],{type:'text/javascript'}));
+  const w=new Worker(url); w._url=url; return w;
+}
+function workerOnce(fnBody, msg, ms=4000){
+  return new Promise((res,rej)=>{
+    let w; try{ w=spawnWorker(fnBody);}catch(e){return rej(e);}
+    const t=setTimeout(()=>{try{w.terminate()}catch(_){};rej(new Error('worker timeout'))},ms);
+    w.onmessage=e=>{clearTimeout(t);try{w.terminate();URL.revokeObjectURL(w._url)}catch(_){}; res(e.data)};
+    w.onerror=e=>{clearTimeout(t);try{w.terminate()}catch(_){}; rej(new Error(e.message||'worker error'))};
+    w.postMessage(msg);
+  });
+}
+
+const ATOMS = [
+  // ── Environment / isolation ───────────────────────────────────────────────
+  {id:'secure-context',cat:'Environment',label:'Secure context',
+   code:`window.isSecureContext`,
+   run:()=> window.isSecureContext ? PASS('secure') : WARN('not a secure context — many APIs gated off')},
+  {id:'cross-origin-isolated',cat:'Environment',label:'crossOriginIsolated (COOP/COEP)',
+   code:`self.crossOriginIsolated  // needs COOP+COEP headers`,
+   run:()=> self.crossOriginIsolated ? PASS('isolated — SharedArrayBuffer/threads allowed')
+        : WARN('false — serve with COOP+COEP for wasm threads/SAB')},
+
+  // ── Concurrency / WASM ────────────────────────────────────────────────────
+  {id:'wasm',cat:'Concurrency / WASM',label:'WebAssembly',
+   code:`new WebAssembly.Instance(new WebAssembly.Module(bytes))`,
+   run:async()=>{ if(typeof WebAssembly==='undefined') return FAIL('no WebAssembly');
+     // minimal module exporting add(a,b)
+     const b=new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+     const m=await WebAssembly.instantiate(b,{}); const r=m.instance.exports.add(19,23);
+     return r===42?PASS('instantiated, add(19,23)=42'):FAIL('bad result '+r);}},
+  {id:'sab',cat:'Concurrency / WASM',label:'SharedArrayBuffer',
+   code:`new SharedArrayBuffer(8)`,
+   run:()=>{ if(typeof SharedArrayBuffer==='undefined') return FAIL('undefined (needs cross-origin isolation)');
+     try{ new SharedArrayBuffer(8); return PASS('allocated'); }catch(e){return FAIL(''+e);} }},
+  {id:'atomics',cat:'Concurrency / WASM',label:'Atomics',
+   code:`Atomics.add(new Int32Array(buf),0,1)`,
+   run:()=>{ if(typeof Atomics==='undefined') return FAIL('no Atomics');
+     const a=new Int32Array(new ArrayBuffer(4)); Atomics.store(a,0,40); Atomics.add(a,0,2);
+     return Atomics.load(a,0)===42?PASS('store/add/load ok'):FAIL('bad'); }},
+  {id:'worker',cat:'Concurrency / WASM',label:'Web Worker (roundtrip)',
+   code:`new Worker(blobURL); postMessage; onmessage`,
+   run:async()=>{ try{ const r=await workerOnce(`onmessage=e=>postMessage(e.data*2)`,21);
+     return r===42?PASS('echo*2 = 42'):FAIL('bad '+r);}catch(e){return FAIL(''+e.message);} }},
+  {id:'hw',cat:'Concurrency / WASM',label:'hardwareConcurrency',
+   code:`navigator.hardwareConcurrency`,
+   run:()=>{ const n=navigator.hardwareConcurrency; return n?PASS(n+' logical cores'):SKIP('unknown'); }},
+
+  // ── Storage ───────────────────────────────────────────────────────────────
+  {id:'opfs',cat:'Storage',label:'OPFS (getDirectory)',
+   code:`await navigator.storage.getDirectory()`,
+   run:async()=>{ if(!navigator.storage?.getDirectory) return FAIL('no getDirectory');
+     const root=await navigator.storage.getDirectory();
+     const d=await root.getDirectoryHandle('capboard',{create:true});
+     const f=await d.getFileHandle('t',{create:true}); const w=await f.createWritable(); await w.write('x'); await w.close();
+     await d.removeEntry('t').catch(()=>{});
+     return PASS('read/write/remove ok'); }},
+  {id:'sync-access',cat:'Storage',label:'FileSystemSyncAccessHandle (worker)',
+   code:`handle.createSyncAccessHandle() // worker-only; a.write/read/flush`,
+   run:async()=>{ try{
+     const r=await workerOnce(`onmessage=async()=>{try{
+        const root=await navigator.storage.getDirectory();
+        const d=await root.getDirectoryHandle('capboard',{create:true});
+        const h=await d.getFileHandle('sync',{create:true});
+        if(!h.createSyncAccessHandle){postMessage({ok:false,why:'no createSyncAccessHandle'});return;}
+        const a=await h.createSyncAccessHandle();
+        const enc=new TextEncoder().encode('hello'); a.truncate(0); a.write(enc,{at:0}); a.flush();
+        const buf=new Uint8Array(a.getSize()); a.read(buf,{at:0}); a.close();
+        await d.removeEntry('sync').catch(()=>{});
+        postMessage({ok:new TextDecoder().decode(buf)==='hello'});
+      }catch(e){postMessage({ok:false,why:''+e})}}`,0);
+     return r.ok===true?PASS('sync write+read ok'):FAIL(r.why||'failed'); }catch(e){return FAIL(''+e.message);} }},
+  {id:'persist',cat:'Storage',label:'storage.persist / estimate',
+   code:`navigator.storage.persisted(); .estimate()`,
+   run:async()=>{ if(!navigator.storage) return FAIL('no storage manager');
+     let out=[]; try{out.push('persisted='+await navigator.storage.persisted())}catch(e){}
+     try{const es=await navigator.storage.estimate(); out.push('quota='+Math.round((es.quota||0)/1048576)+'MB')}catch(e){}
+     return out.length?PASS(out.join(' · ')):WARN('no persist/estimate'); }},
+  {id:'localstorage',cat:'Storage',label:'localStorage',
+   code:`localStorage.setItem/getItem`,
+   run:()=>{ try{localStorage.setItem('_cb','1');const v=localStorage.getItem('_cb');localStorage.removeItem('_cb');
+     return v==='1'?PASS('set/get ok'):FAIL('bad');}catch(e){return FAIL(''+e);} }},
+  {id:'indexeddb',cat:'Storage',label:'IndexedDB',
+   code:`indexedDB.open; store.put/get`,
+   run:()=>new Promise(res=>{ if(!self.indexedDB)return res(FAIL('no indexedDB'));
+     const rq=indexedDB.open('capboard',1);
+     rq.onupgradeneeded=()=>rq.result.createObjectStore('s');
+     rq.onerror=()=>res(FAIL('open error'));
+     rq.onsuccess=()=>{const db=rq.result;const tx=db.transaction('s','readwrite');tx.objectStore('s').put(42,'k');
+       tx.oncomplete=()=>{const g=db.transaction('s').objectStore('s').get('k');
+         g.onsuccess=()=>{res(g.result===42?PASS('put/get 42 ok'):FAIL('bad'));db.close()};};};})},
+
+  // ── Coordination / crypto ─────────────────────────────────────────────────
+  {id:'web-locks',cat:'Coordination / Crypto',label:'Web Locks',
+   code:`navigator.locks.request(name,{mode},cb)`,
+   run:async()=>{ if(!navigator.locks?.request) return FAIL('no navigator.locks');
+     let got=false; await navigator.locks.request('cb-probe',{mode:'exclusive'},async()=>{got=true});
+     return got?PASS('acquired + released'):FAIL('callback never ran'); }},
+  {id:'subtle-sha',cat:'Coordination / Crypto',label:'crypto.subtle (SHA-256)',
+   code:`crypto.subtle.digest('SHA-256', bytes)`,
+   run:async()=>{ if(!crypto?.subtle) return FAIL('no crypto.subtle (needs secure context)');
+     const d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('abc'));
+     const hex=[...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join('');
+     const ok=hex.startsWith('ba7816bf8f01cfea');
+     return ok?PASS('SHA-256("abc") verified'):FAIL('wrong digest '+hex.slice(0,16)); }},
+  {id:'getrandom',cat:'Coordination / Crypto',label:'crypto.getRandomValues',
+   code:`crypto.getRandomValues(new Uint8Array(16))`,
+   run:()=>{ if(!crypto?.getRandomValues) return FAIL('none'); const a=new Uint8Array(16);crypto.getRandomValues(a);
+     return a.some(x=>x!==0)?PASS('filled'):FAIL('all zero'); }},
+
+  // ── Graphics (drawn + pixel-verified) ─────────────────────────────────────
+  {id:'canvas2d',cat:'Graphics',label:'Canvas 2D',
+   code:`ctx.fillRect(); ctx.getImageData() // verify pixel`,
+   run:()=>{ const c=document.createElement('canvas');c.width=c.height=32;const x=c.getContext('2d');
+     if(!x)return FAIL('no 2d context'); x.fillStyle='#ff6a00';x.fillRect(0,0,32,32);
+     const p=x.getImageData(16,16,1,1).data;
+     const ok=p[0]>200&&p[1]>80&&p[1]<160&&p[2]<40;
+     return ok?PASS(`pixel rgb(${p[0]},${p[1]},${p[2]})`,(cv)=>cv.getContext('2d').drawImage(c,0,0))
+       :FAIL(`unexpected pixel rgb(${p[0]},${p[1]},${p[2]})`); }},
+  {id:'webgl',cat:'Graphics',label:'WebGL',
+   code:`gl.clearColor; gl.clear; readPixels; RENDERER`,
+   run:()=>{ const c=document.createElement('canvas');c.width=c.height=32;
+     const gl=c.getContext('webgl')||c.getContext('experimental-webgl'); if(!gl)return FAIL('no WebGL context');
+     gl.clearColor(1,.4,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+     const p=new Uint8Array(4);gl.readPixels(16,16,1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);
+     const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+     const rend=dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+     const ok=p[0]>200&&p[2]<40;
+     return ok?PASS(String(rend),(cv)=>{const g=cv.getContext('2d');g.fillStyle=`rgb(${p[0]},${p[1]},${p[2]})`;g.fillRect(0,0,32,32);})
+       :FAIL('clear readback wrong rgb('+p[0]+','+p[1]+','+p[2]+')'); }},
+  {id:'webgl2',cat:'Graphics',label:'WebGL2',
+   code:`canvas.getContext('webgl2')`,
+   run:()=>{ const c=document.createElement('canvas'); const gl=c.getContext('webgl2');
+     if(!gl)return FAIL('no WebGL2'); const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+     return PASS(String(dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.VERSION))); }},
+  {id:'webgpu',cat:'Graphics',label:'WebGPU (adapter → render → readback)',
+   code:`navigator.gpu.requestAdapter(); device; render triangle; copy+map → verify pixel`,
+   run:async()=>{ if(!navigator.gpu) return FAIL('no navigator.gpu');
+     const adapter=await navigator.gpu.requestAdapter(); if(!adapter) return FAIL('requestAdapter() → null (backend off)');
+     const info=adapter.info||{}; let device; try{device=await adapter.requestDevice()}catch(e){return FAIL('requestDevice: '+e.message);}
+     try{
+       const S=32; const tex=device.createTexture({size:[S,S],format:'rgba8unorm',
+         usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+       const mod=device.createShaderModule({code:`
+         @vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f{
+           var p=array(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.)); return vec4f(p[i],0.,1.);}
+         @fragment fn fs()->@location(0) vec4f{ return vec4f(1.,0.4,0.,1.);}`});
+       const pipe=device.createRenderPipeline({layout:'auto',vertex:{module:mod,entryPoint:'vs'},
+         fragment:{module:mod,entryPoint:'fs',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-list'}});
+       const enc=device.createCommandEncoder();
+       const pass=enc.beginRenderPass({colorAttachments:[{view:tex.createView(),clearValue:{r:0,g:0,b:0.3,a:1},loadOp:'clear',storeOp:'store'}]});
+       pass.setPipeline(pipe);pass.draw(3);pass.end();
+       const bpr=256; const buf=device.createBuffer({size:bpr*S,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+       enc.copyTextureToBuffer({texture:tex},{buffer:buf,bytesPerRow:bpr},[S,S]);
+       device.queue.submit([enc.finish()]);
+       await buf.mapAsync(GPUMapMode.READ); const px=new Uint8Array(buf.getMappedRange().slice(0,4));
+       const ok=px[0]>200&&px[2]<60;
+       const desc=info.description||info.device||info.vendor||'adapter';
+       return ok?PASS('rendered on '+desc,(cv)=>{const g=cv.getContext('2d');g.fillStyle=`rgb(${px[0]},${px[1]},${px[2]})`;g.fillRect(0,0,32,32);})
+         :FAIL('rendered but pixel wrong rgb('+px[0]+','+px[1]+','+px[2]+')');
+     }catch(e){return FAIL('render: '+e.message);} }},
+  {id:'offscreen',cat:'Graphics',label:'OffscreenCanvas',
+   code:`new OffscreenCanvas(1,1)`,
+   run:()=> typeof OffscreenCanvas!=='undefined' ? PASS('available') : FAIL('none')},
+  {id:'p3',cat:'Graphics',label:'CSS Display-P3 color',
+   code:`CSS.supports('color','color(display-p3 1 0 0)')`,
+   run:()=> self.CSS&&CSS.supports('color','color(display-p3 1 0 0)') ? PASS('supported') : WARN('no display-p3')},
+
+  // ── Files / transfer / input ──────────────────────────────────────────────
+  {id:'fsa-save',cat:'Files / Transfer / Input',label:'File System Access (showSaveFilePicker)',
+   code:`'showSaveFilePicker' in window  // needs a user gesture to invoke`,
+   run:()=> ('showSaveFilePicker' in window) ? PASS('present (real Save-As)') : WARN('absent — falls back to download')},
+  {id:'blob-url',cat:'Files / Transfer / Input',label:'Blob + URL.createObjectURL',
+   code:`URL.createObjectURL(new Blob([...]))`,
+   run:()=>{ try{const u=URL.createObjectURL(new Blob(['x']));URL.revokeObjectURL(u);return PASS('ok');}catch(e){return FAIL(''+e);} }},
+  {id:'transfer',cat:'Files / Transfer / Input',label:'Transferable ArrayBuffer',
+   code:`worker.postMessage(buf,[buf]) // zero-copy, source detached`,
+   run:async()=>{ try{ const ab=new ArrayBuffer(8); new Uint8Array(ab)[0]=7;
+     const r=await workerOnce(`onmessage=e=>postMessage(new Uint8Array(e.data)[0])`,ab,undefined);
+     // after transfer the source buffer is detached (byteLength 0)
+     const detached=ab.byteLength===0;
+     return (r===7&&detached)?PASS('zero-copy transfer, source detached'):WARN('moved='+(r===7)+' detached='+detached);
+   }catch(e){return FAIL(''+e.message);} }},
+  {id:'structured-clone',cat:'Files / Transfer / Input',label:'structuredClone',
+   code:`structuredClone({...})`,
+   run:()=>{ if(typeof structuredClone==='undefined')return WARN('no structuredClone');
+     const o={a:1,b:[2,3],d:new Date(0)}; const c=structuredClone(o);
+     return (c.b[1]===3&&c!==o)?PASS('deep clone ok'):FAIL('bad'); }},
+  {id:'broadcast',cat:'Files / Transfer / Input',label:'BroadcastChannel',
+   code:`new BroadcastChannel(name) // cross-tab messaging`,
+   run:()=>new Promise(res=>{ if(typeof BroadcastChannel==='undefined')return res(FAIL('none'));
+     const a=new BroadcastChannel('cb'),b=new BroadcastChannel('cb');
+     const t=setTimeout(()=>{a.close();b.close();res(WARN('no echo (ok if single-context)'))},800);
+     b.onmessage=e=>{clearTimeout(t);a.close();b.close();res(e.data===42?PASS('cross-channel echo'):FAIL('bad'))};
+     a.postMessage(42);})},
+  {id:'pointer',cat:'Files / Transfer / Input',label:'Pointer Events',
+   code:`'PointerEvent' in window; el.setPointerCapture`,
+   run:()=> ('PointerEvent' in window) ? PASS('present'+((('setPointerCapture' in Element.prototype))?' + capture':'')) : FAIL('none')},
+  {id:'clipboard',cat:'Files / Transfer / Input',label:'Clipboard API',
+   code:`navigator.clipboard.writeText // needs gesture/permission`,
+   run:()=> navigator.clipboard?.writeText ? PASS('present (writeText)') : WARN('absent')},
+
+  // ── Observers / timing ────────────────────────────────────────────────────
+  {id:'resizeobs',cat:'Observers / Timing',label:'ResizeObserver',code:`new ResizeObserver(cb)`,
+   run:()=> typeof ResizeObserver!=='undefined'?PASS('available'):FAIL('none')},
+  {id:'intersectionobs',cat:'Observers / Timing',label:'IntersectionObserver',code:`new IntersectionObserver(cb)`,
+   run:()=> typeof IntersectionObserver!=='undefined'?PASS('available'):FAIL('none')},
+  {id:'ric',cat:'Observers / Timing',label:'requestIdleCallback',code:`requestIdleCallback(cb)`,
+   run:()=> typeof requestIdleCallback!=='undefined'?PASS('available'):WARN('absent (Safari) — use timeout fallback')},
+  {id:'perf',cat:'Observers / Timing',label:'performance.now (monotonic)',code:`performance.now()`,
+   run:()=>{ const a=performance.now();for(let i=0;i<1e5;i++); const b=performance.now();
+     return b>=a?PASS('Δ '+(b-a).toFixed(2)+'ms'):FAIL('non-monotonic'); }},
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runner + UI
+// ─────────────────────────────────────────────────────────────────────────────
+function detectBrowser(){
+  const ua=navigator.userAgent, d=navigator.userAgentData;
+  let name='Unknown';
+  if(d&&d.brands){ const b=d.brands.find(x=>!/Not.?A.?Brand/i.test(x.brand)); if(b)name=b.brand+' '+b.version; }
+  if(name==='Unknown'){
+    if(/Servo/i.test(ua))name='Servo';
+    else if(/Firefox\/(\d+)/.test(ua))name='Firefox '+RegExp.$1;
+    else if(/Edg\/(\d+)/.test(ua))name='Edge '+RegExp.$1;
+    else if(/Chrome\/(\d+)/.test(ua))name='Chrome '+RegExp.$1;
+    else if(/Version\/([\d.]+).*Safari/.test(ua))name='Safari '+RegExp.$1;
+    else if(/Safari/.test(ua))name='Safari';
+  }
+  const plat=(d&&d.platform)||navigator.platform||'';
+  return {name,platform:plat,ua};
+}
+const BROWSER=detectBrowser();
+const results={};
+
+function envLine(){
+  const e=document.getElementById('env');
+  const bits=[
+    ['Browser',BROWSER.name],['Platform',BROWSER.platform||'?'],
+    ['Secure',String(window.isSecureContext)],['Isolated',String(!!self.crossOriginIsolated)],
+    ['Cores',navigator.hardwareConcurrency||'?'],['Mem',(navigator.deviceMemory||'?')+'GB'],
+  ];
+  e.innerHTML=bits.map(([k,v])=>`${k} <b>${v}</b>`).join('')
+    +`<span style="flex-basis:100%;margin-top:2px;opacity:.7">${BROWSER.ua}</span>`;
+}
+
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+function render(){
+  const main=document.getElementById('main'); main.innerHTML='';
+  const cats=[...new Set(ATOMS.map(a=>a.cat))];
+  for(const cat of cats){
+    const h=document.createElement('div');h.className='cat';h.textContent=cat;main.appendChild(h);
+    const g=document.createElement('div');g.className='grid';main.appendChild(g);
+    for(const a of ATOMS.filter(x=>x.cat===cat)){
+      const r=results[a.id]||{status:'run'};
+      const card=document.createElement('div');card.className='card'+(r.status==='fail'?' fail':'');card.id='card-'+a.id;
+      card.innerHTML=`
+        <div class="row"><span class="pill p-${r.status}">${r.status}</span><span class="name">${esc(a.label)}</span></div>
+        <div class="detail">${esc(r.detail||(r.status==='run'?'running…':''))}</div>
+        <div class="vis"></div>
+        <details><summary>probe</summary><pre>${esc(a.code)}</pre></details>`;
+      g.appendChild(card);
+      if(r.draw){ const cv=document.createElement('canvas');cv.width=cv.height=32;cv.style.width=cv.style.height='40px';
+        card.querySelector('.vis').appendChild(cv); try{r.draw(cv)}catch(_){} }
+    }
+  }
+  tally();
+}
+function tally(){
+  const c={pass:0,fail:0,warn:0,skip:0};
+  for(const a of ATOMS){const s=results[a.id]?.status; if(c[s]!==undefined)c[s]++;}
+  document.getElementById('tally').innerHTML=
+    `<span class="t-pass">${c.pass} pass</span><span class="t-fail">${c.fail} fail</span>`+
+    `<span class="t-warn">${c.warn} warn</span><span class="t-skip">${c.skip} skip</span>`;
+}
+
+async function runAll(){
+  for(const a of ATOMS){results[a.id]={status:'run'};}
+  render();
+  for(const a of ATOMS){
+    const t0=performance.now();
+    try{ results[a.id]=await Promise.resolve(a.run()); }
+    catch(e){ results[a.id]=FAIL('threw: '+(e&&e.message||e)); }
+    results[a.id].ms=+(performance.now()-t0).toFixed(1);
+    render();
+    console.log('[CAPBOARD] '+a.id+' = '+results[a.id].status+' :: '+(results[a.id].detail||''));
+  }
+  console.log('[CAPBOARD] DONE '+JSON.stringify(summary()));
+}
+
+function summary(){
+  const out={browser:BROWSER.name,platform:BROWSER.platform,ua:BROWSER.ua,
+    isolated:!!self.crossOriginIsolated,secure:window.isSecureContext,when:new Date().toISOString(),results:{}};
+  for(const a of ATOMS){const r=results[a.id]||{};out.results[a.id]={status:r.status,detail:r.detail,ms:r.ms};}
+  return out;
+}
+
+document.getElementById('rerun').onclick=runAll;
+document.getElementById('copy').onclick=async()=>{
+  const j=JSON.stringify(summary(),null,2);
+  try{await navigator.clipboard.writeText(j);document.getElementById('copy').textContent='Copied ✓';
+    setTimeout(()=>document.getElementById('copy').textContent='Copy JSON',1200);}
+  catch(e){ const ta=document.createElement('textarea');ta.value=j;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove(); }
+};
+document.getElementById('dl').onclick=()=>{
+  const blob=new Blob([JSON.stringify(summary(),null,2)],{type:'application/json'});
+  const u=URL.createObjectURL(blob);const a=document.createElement('a');
+  a.href=u;a.download='capboard-'+BROWSER.name.replace(/\s+/g,'_')+'.json';a.click();URL.revokeObjectURL(u);
+};
+document.getElementById('focus').onclick=()=>{
+  const first=ATOMS.find(a=>results[a.id]?.status==='fail');
+  if(first)document.getElementById('card-'+first.id)?.scrollIntoView({behavior:'smooth',block:'center'});
+};
+
+// ── Record + score-over-time (optional server) ───────────────────────────────
+// Point at your capboard endpoint: ?server=https://host/capboard  (POST a run, GET the list).
+const SERVER = new URLSearchParams(location.search).get('server') || '';
+async function record(){
+  const btn=document.getElementById('record');
+  if(!SERVER){ btn.textContent='add ?server=…'; setTimeout(()=>btn.textContent='Record ↑',1600); return; }
+  btn.textContent='Recording…';
+  try{ const res=await fetch(SERVER,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(summary())});
+    btn.textContent=res.ok?'Recorded ✓':'Failed'; if(res.ok) loadHistory();
+  }catch(e){ btn.textContent='Failed'; }
+  setTimeout(()=>btn.textContent='Record ↑',1600);
+}
+document.getElementById('record').onclick=record;
+async function loadHistory(){
+  const el=document.getElementById('history'); if(!SERVER){ el.innerHTML=''; return; }
+  el.innerHTML='<div class="cat">Score over time</div><div style="color:var(--dim);font-size:11.5px">loading…</div>';
+  let runs=[]; try{ runs=await (await fetch(SERVER)).json(); }catch(e){ el.lastChild.textContent='no history yet (server?)'; return; }
+  if(!Array.isArray(runs)||!runs.length){ el.lastChild.textContent='no runs recorded yet'; return; }
+  drawChart(el, runs);
+}
+function drawChart(el, runs){
+  const total=ATOMS.length;
+  const pts=runs.map(r=>({browser:r.browser||'?',t:Date.parse(r.when)||0,
+     pass:Object.values(r.results||{}).filter(x=>x.status==='pass').length})).filter(p=>p.t);
+  if(!pts.length){ el.innerHTML='<div class="cat">Score over time</div>'; return; }
+  const byB={}; for(const p of pts)(byB[p.browser]=byB[p.browser]||[]).push(p);
+  for(const k in byB) byB[k].sort((a,b)=>a.t-b.t);
+  const browsers=Object.keys(byB), COLORS=['#3ecf8e','#e2a93b','#5aa9e6','#e5737d','#b79cff','#e58a4b'];
+  const ts=pts.map(p=>p.t); let tmin=Math.min(...ts),tmax=Math.max(...ts); if(tmin===tmax){tmin-=864e5;tmax+=864e5;}
+  const W=1060,H=280,ml=40,mr=160,mt=16,mb=28, iw=W-ml-mr, ih=H-mt-mb;
+  const X=t=>ml+iw*(t-tmin)/(tmax-tmin), Y=v=>mt+ih*(1-v/total), fmtD=t=>new Date(t).toISOString().slice(5,10);
+  let svg=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="background:var(--panel);border:1px solid var(--line);border-radius:10px">`;
+  const step=Math.max(1,Math.ceil(total/5));
+  for(let v=0;v<=total;v+=step){ const y=Y(v);
+    svg+=`<line x1="${ml}" y1="${y}" x2="${ml+iw}" y2="${y}" stroke="var(--line)"/><text x="${ml-6}" y="${y+3}" fill="var(--dim)" font-size="10" text-anchor="end">${v}</text>`; }
+  [tmin,(tmin+tmax)/2,tmax].forEach(t=>svg+=`<text x="${X(t)}" y="${H-10}" fill="var(--dim)" font-size="10" text-anchor="middle">${fmtD(t)}</text>`);
+  browsers.forEach((b,i)=>{ const c=COLORS[i%COLORS.length], s=byB[b];
+    const d=s.map((p,j)=>(j?'L':'M')+X(p.t).toFixed(1)+' '+Y(p.pass).toFixed(1)).join(' ');
+    svg+=`<path d="${d}" fill="none" stroke="${c}" stroke-width="2"/>`;
+    s.forEach(p=>svg+=`<circle cx="${X(p.t).toFixed(1)}" cy="${Y(p.pass).toFixed(1)}" r="3" fill="${c}"/>`);
+    const last=s[s.length-1];
+    svg+=`<text x="${ml+iw+12}" y="${mt+14+i*18}" fill="${c}" font-size="11">${esc(b)} — ${last.pass}/${total}</text>`; });
+  svg+=`<text x="${ml+iw+12}" y="${mt+16+browsers.length*18+6}" fill="var(--dim)" font-size="10">pass / ${total} probes</text></svg>`;
+  el.innerHTML='<div class="cat">Score over time</div>'+svg;
+}
+
+envLine();
+runAll().then(()=>{ loadHistory(); if(new URLSearchParams(location.search).get('record')==='1') record(); });
+</script>
+</body>
+</html>
